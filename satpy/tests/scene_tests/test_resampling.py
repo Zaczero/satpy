@@ -415,6 +415,74 @@ class TestSceneResampling:
         assert new_scene2["comp19"].shape == (20, 20, 3)
         assert new_scene3["comp19"].shape == (20, 20, 3)
 
+    def test_resample_reduce_data_geostationary_cross_projection_bounds(self):
+        """Test reduction keeps all destination-covered source rows/cols."""
+        from pyresample.geometry import AreaDefinition
+
+        source_area = AreaDefinition(
+            "src",
+            "src",
+            "src",
+            {
+                "proj": "geos",
+                "a": 6378169.0,
+                "b": 6356583.8,
+                "h": 35785831.0,
+                "lon_0": 0.0,
+                "units": "m",
+            },
+            3712,
+            1392,
+            (5568748.0, 5568748.0, -5568748.0, 1392187.0),
+        )
+        destination_area = AreaDefinition(
+            "dst",
+            "dst",
+            "dst",
+            {"proj": "latlong", "datum": "WGS84"},
+            768,
+            768,
+            (7.456086060029671, 43.98125198600542, 33.461915849571966, 59.24271064133026),
+        )
+        scene = Scene()
+        dataset = xr.DataArray(
+            np.zeros(source_area.shape, dtype=np.float32),
+            dims=("y", "x"),
+            attrs={"name": "test", "area": source_area},
+        )
+        reduced_dataset, reduced_area = scene._reduce_data(
+            dataset,
+            source_area,
+            destination_area,
+            True,
+            {},
+            {"resampler": "bilinear"},
+        )
+        destination_lons, destination_lats = destination_area.get_lonlats()
+        source_cols, source_rows = source_area.get_array_indices_from_lonlat(
+            destination_lons,
+            destination_lats,
+        )
+        valid = ~np.ma.getmaskarray(source_cols) & ~np.ma.getmaskarray(source_rows)
+        valid_cols = np.asarray(source_cols[valid], dtype=np.int64)
+        valid_rows = np.asarray(source_rows[valid], dtype=np.int64)
+        row_offset, col_offset = reduced_area.crop_offset
+        assert col_offset <= valid_cols.min()
+        assert row_offset <= valid_rows.min()
+        assert col_offset + reduced_area.width > valid_cols.max()
+        assert row_offset + reduced_area.height > valid_rows.max()
+        assert reduced_dataset.shape == (reduced_area.height, reduced_area.width)
+        _, gradient_reduced_area = scene._reduce_data(
+            dataset,
+            source_area,
+            destination_area,
+            True,
+            {},
+            {"resampler": "gradient_search", "shape_divisible_by": 2},
+        )
+        assert gradient_reduced_area.width % 2 == 0
+        assert gradient_reduced_area.height % 2 == 0
+
     @mock.patch("satpy.resample.base.resample_dataset")
     def test_no_generate_comp10(self, rs):
         """Test generating a composite after loading."""

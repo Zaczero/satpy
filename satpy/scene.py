@@ -927,6 +927,81 @@ class Scene:
             resamplers[source_area] = resampler
             self._resamplers[key] = resampler
 
+    @staticmethod
+    def _is_cross_projection_geostationary_reduction(source_area, destination_area):
+        return (
+            isinstance(source_area, AreaDefinition)
+            and isinstance(destination_area, AreaDefinition)
+            and source_area.is_geostationary
+            and source_area.crs != destination_area.crs
+        )
+
+    @staticmethod
+    def _slice_from_destination_coverage(source_area, destination_area):
+        max_points_per_chunk = 600_000
+        row_block_size = max(1, max_points_per_chunk // destination_area.width)
+        min_col = None
+        max_col = None
+        min_row = None
+        max_row = None
+        try:
+            for row_start in range(0, destination_area.height, row_block_size):
+                row_stop = min(destination_area.height, row_start + row_block_size)
+                destination_lons, destination_lats = destination_area.get_lonlats(
+                    data_slice=(slice(row_start, row_stop), slice(None)),
+                    dtype=np.float32,
+                )
+                source_cols, source_rows = source_area.get_array_indices_from_lonlat(
+                    destination_lons, destination_lats
+                )
+                valid_cols = ~np.ma.getmaskarray(source_cols)
+                valid_rows = ~np.ma.getmaskarray(source_rows)
+                valid = valid_cols & valid_rows
+                if not np.any(valid):
+                    continue
+                source_cols = np.ma.array(source_cols, mask=~valid, copy=False)
+                source_rows = np.ma.array(source_rows, mask=~valid, copy=False)
+                chunk_min_col = int(np.ma.min(source_cols))
+                chunk_max_col = int(np.ma.max(source_cols))
+                chunk_min_row = int(np.ma.min(source_rows))
+                chunk_max_row = int(np.ma.max(source_rows))
+                min_col = chunk_min_col if min_col is None else min(min_col, chunk_min_col)
+                max_col = chunk_max_col if max_col is None else max(max_col, chunk_max_col)
+                min_row = chunk_min_row if min_row is None else min(min_row, chunk_min_row)
+                max_row = chunk_max_row if max_row is None else max(max_row, chunk_max_row)
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        if min_col is None or min_row is None or max_col is None or max_row is None:
+            return None
+        col_start = max(0, min_col)
+        col_stop = min(source_area.width, max_col + 1)
+        row_start = max(0, min_row)
+        row_stop = min(source_area.height, max_row + 1)
+        if col_start >= col_stop or row_start >= row_stop:
+            return None
+        return slice(col_start, col_stop), slice(row_start, row_stop)
+
+    @staticmethod
+    def _merge_reduction_slices(base_slice, extra_slice):
+        if extra_slice is None:
+            return base_slice
+        return slice(
+            min(base_slice.start, extra_slice.start),
+            max(base_slice.stop, extra_slice.stop),
+        )
+
+    @staticmethod
+    def _make_slice_divisible(slice_obj, max_size, factor):
+        remainder = (slice_obj.stop - slice_obj.start) % factor
+        if remainder == 0:
+            return slice_obj
+        adjustment = factor - remainder
+        if slice_obj.stop + adjustment <= max_size:
+            return slice(slice_obj.start, slice_obj.stop + adjustment)
+        if slice_obj.start >= adjustment:
+            return slice(slice_obj.start - adjustment, slice_obj.stop)
+        return slice(slice_obj.start, slice_obj.stop - remainder)
+
     def _reduce_data(self, dataset, source_area, destination_area, reduce_data, reductions, resample_kwargs):
         try:
             if reduce_data:
@@ -944,6 +1019,24 @@ class Scene:
                     except TypeError:
                         slice_x, slice_y = source_area.get_area_slices(
                             destination_area)
+                    if self._is_cross_projection_geostationary_reduction(source_area, destination_area):
+                        coverage_slices = self._slice_from_destination_coverage(
+                            source_area, destination_area
+                        )
+                        if coverage_slices is not None:
+                            slice_x = self._merge_reduction_slices(
+                                slice_x, coverage_slices[0]
+                            )
+                            slice_y = self._merge_reduction_slices(
+                                slice_y, coverage_slices[1]
+                            )
+                    if factor is not None:
+                        slice_x = self._make_slice_divisible(
+                            slice_x, source_area.width, factor
+                        )
+                        slice_y = self._make_slice_divisible(
+                            slice_y, source_area.height, factor
+                        )
                     source_area = source_area[slice_y, slice_x]
                     reductions[key] = (slice_x, slice_y), source_area
                 dataset = self._slice_data(source_area, (slice_x, slice_y), dataset)
