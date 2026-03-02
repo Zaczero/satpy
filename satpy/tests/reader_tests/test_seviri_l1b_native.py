@@ -1026,6 +1026,20 @@ class TestNativeMSGDataset:
         mocked_add.assert_not_called()
         assert "acq_time" not in xarr.coords
 
+    def test_get_acq_time_visir_uses_cached_values(self, file_handler):
+        """Test VISIR acquisition-time reuse from cache."""
+        file_handler._get_acq_time_visir({"name": "VIS006"})
+        assert file_handler._acq_time_visir is not None
+
+        cached = np.empty_like(file_handler._acq_time_visir)
+        cached["Days"] = 42
+        cached["Milliseconds"] = 123456
+        file_handler._acq_time_visir = cached
+
+        tline = file_handler._get_acq_time_visir({"name": "IR_108"})
+        np.testing.assert_array_equal(tline["Days"], np.full(tline.shape, 42))
+        np.testing.assert_array_equal(tline["Milliseconds"], np.full(tline.shape, 123456))
+
     def test_time(self, file_handler):
         """Test start/end nominal/observation time handling."""
         assert dt.datetime(2006, 1, 1, 12, 15, 9, 304888) == file_handler.observation_start_time
